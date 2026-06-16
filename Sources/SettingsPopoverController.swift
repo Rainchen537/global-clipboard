@@ -38,6 +38,7 @@ final class SettingsPopoverController: NSObject, NSPopoverDelegate {
         return panel
     }()
     private var previewHideWorkItem: DispatchWorkItem?
+    private var isPreviewHeldByHover = false
     private var escapeMonitor: Any?
     var onClose: (() -> Void)?
 
@@ -88,6 +89,9 @@ final class SettingsPopoverController: NSObject, NSPopoverDelegate {
         settingsViewController.onPreviewAdjustment = { [weak self] in
             self?.showPreviewPanelTemporarily()
         }
+        settingsViewController.onDisplayHoverChange = { [weak self] isHovering in
+            self?.setPreviewHovering(isHovering)
+        }
     }
 
     var isShown: Bool {
@@ -97,6 +101,9 @@ final class SettingsPopoverController: NSObject, NSPopoverDelegate {
     func show(relativeTo view: NSView, preferredEdge: NSRectEdge = .minY) {
         updateLaunchAtLogin(LaunchAtLoginController.isEnabled)
         popover.show(relativeTo: view.bounds, of: view, preferredEdge: preferredEdge)
+        DispatchQueue.main.async { [weak self] in
+            self?.settingsViewController.clearInitialFocus()
+        }
         beginEscapeMonitoring()
     }
 
@@ -108,6 +115,9 @@ final class SettingsPopoverController: NSObject, NSPopoverDelegate {
         )
         anchorPanel.orderFront(nil)
         popover.show(relativeTo: anchorView.bounds, of: anchorView, preferredEdge: preferredEdge)
+        DispatchQueue.main.async { [weak self] in
+            self?.settingsViewController.clearInitialFocus()
+        }
         beginEscapeMonitoring()
     }
 
@@ -135,8 +145,13 @@ final class SettingsPopoverController: NSObject, NSPopoverDelegate {
         settingsViewController.updateUpdateStatus(status)
     }
 
+    func popoverDidShow(_ notification: Notification) {
+        settingsViewController.clearInitialFocus()
+    }
+
     func popoverDidClose(_ notification: Notification) {
         endEscapeMonitoring()
+        isPreviewHeldByHover = false
         previewHideWorkItem?.cancel()
         previewHideWorkItem = nil
         previewPanel.orderOut(nil)
@@ -175,16 +190,57 @@ final class SettingsPopoverController: NSObject, NSPopoverDelegate {
             return
         }
 
-        positionPreviewPanel()
-        previewPanel.orderFront(nil)
+        showPreviewPanel()
+
+        guard !isPreviewHeldByHover else {
+            return
+        }
 
         previewHideWorkItem?.cancel()
         let workItem = DispatchWorkItem { [weak self] in
-            self?.previewPanel.orderOut(nil)
-            self?.previewHideWorkItem = nil
+            guard self?.isPreviewHeldByHover == false else {
+                return
+            }
+
+            self?.hidePreviewPanel()
         }
         previewHideWorkItem = workItem
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.0, execute: workItem)
+    }
+
+    private func setPreviewHovering(_ isHovering: Bool) {
+        isPreviewHeldByHover = isHovering
+
+        if isHovering {
+            previewHideWorkItem?.cancel()
+            previewHideWorkItem = nil
+            showPreviewPanel()
+        } else {
+            previewHideWorkItem?.cancel()
+            let workItem = DispatchWorkItem { [weak self] in
+                guard self?.isPreviewHeldByHover == false else {
+                    return
+                }
+
+                self?.hidePreviewPanel()
+            }
+            previewHideWorkItem = workItem
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.12, execute: workItem)
+        }
+    }
+
+    private func showPreviewPanel() {
+        guard popover.isShown else {
+            return
+        }
+
+        positionPreviewPanel()
+        previewPanel.orderFront(nil)
+    }
+
+    private func hidePreviewPanel() {
+        previewPanel.orderOut(nil)
+        previewHideWorkItem = nil
     }
 
     private func positionPreviewPanel() {
@@ -259,6 +315,7 @@ final class SettingsViewController: NSViewController {
     private let onOpenAccessibility: () -> Void
     private let onOpenGitHub: () -> Void
     var onPreviewAdjustment: (() -> Void)?
+    var onDisplayHoverChange: ((Bool) -> Void)?
     var panelMetrics: HistoryPanelMetrics {
         currentPanelMetrics
     }
@@ -308,7 +365,7 @@ final class SettingsViewController: NSViewController {
     }
 
     override func loadView() {
-        let rootView = NSVisualEffectView(frame: NSRect(x: 0, y: 0, width: 432, height: 520))
+        let rootView = SettingsRootView(frame: NSRect(x: 0, y: 0, width: 432, height: 520))
         rootView.material = .popover
         rootView.blendingMode = .withinWindow
         rootView.state = .active
@@ -352,7 +409,10 @@ final class SettingsViewController: NSViewController {
                 makeSliderRow(title: "大小", slider: scaleSlider, valueLabel: scaleValueLabel),
                 makeSliderRow(title: "宽度", slider: widthSlider, valueLabel: widthValueLabel),
                 makeSliderRow(title: "长度", slider: lengthSlider, valueLabel: lengthValueLabel)
-            ]
+            ],
+            onHoverChange: { [weak self] isHovering in
+                self?.onDisplayHoverChange?(isHovering)
+            }
         )
 
         let shortcutTitleLabel = NSTextField(labelWithString: "快捷键")
@@ -486,6 +546,11 @@ final class SettingsViewController: NSViewController {
             historyLimitField.widthAnchor.constraint(equalToConstant: 58),
             commandGrid.widthAnchor.constraint(equalTo: actionsSection.widthAnchor, constant: -28)
         ])
+    }
+
+    func clearInitialFocus() {
+        view.window?.makeFirstResponder(view)
+        historyLimitField.currentEditor()?.selectedRange = NSRange(location: 0, length: 0)
     }
 
     func updateHotKey(_ hotKey: HotKey) {
@@ -669,7 +734,11 @@ final class SettingsViewController: NSViewController {
         return row
     }
 
-    private func makeSection(title: String, views: [NSView]) -> NSView {
+    private func makeSection(
+        title: String,
+        views: [NSView],
+        onHoverChange: ((Bool) -> Void)? = nil
+    ) -> NSView {
         let titleLabel = label(title, weight: .semibold)
         titleLabel.textColor = .labelColor
 
@@ -679,7 +748,14 @@ final class SettingsViewController: NSViewController {
         stack.spacing = 10
         stack.translatesAutoresizingMaskIntoConstraints = false
 
-        let container = NSView()
+        let container: NSView
+        if let onHoverChange {
+            let hoverContainer = HoverTrackingView()
+            hoverContainer.onHoverChange = onHoverChange
+            container = hoverContainer
+        } else {
+            container = NSView()
+        }
         container.wantsLayer = true
         container.layer?.cornerRadius = 12
         container.layer?.backgroundColor = NSColor.controlBackgroundColor.withAlphaComponent(0.62).cgColor
@@ -717,6 +793,60 @@ final class SettingsViewController: NSViewController {
         let label = NSTextField(labelWithString: title)
         label.font = .systemFont(ofSize: 13, weight: weight)
         return label
+    }
+}
+
+final class SettingsRootView: NSVisualEffectView {
+    override var acceptsFirstResponder: Bool {
+        true
+    }
+}
+
+final class HoverTrackingView: NSView {
+    var onHoverChange: ((Bool) -> Void)?
+    private var trackingAreaRef: NSTrackingArea?
+    private var isHovering = false
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+
+        if let trackingAreaRef {
+            removeTrackingArea(trackingAreaRef)
+        }
+
+        let area = NSTrackingArea(
+            rect: bounds,
+            options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect],
+            owner: self,
+            userInfo: nil
+        )
+        trackingAreaRef = area
+        addTrackingArea(area)
+    }
+
+    override func mouseEntered(with event: NSEvent) {
+        setHovering(true)
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        setHovering(false)
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+
+        if window == nil {
+            setHovering(false)
+        }
+    }
+
+    private func setHovering(_ value: Bool) {
+        guard isHovering != value else {
+            return
+        }
+
+        isHovering = value
+        onHoverChange?(value)
     }
 }
 
