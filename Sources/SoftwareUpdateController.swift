@@ -1,6 +1,15 @@
 import AppKit
 import Foundation
 
+enum SoftwareUpdateStatus: Equatable {
+    case idle
+    case checking
+    case upToDate(String)
+    case available(version: String, assetURL: URL, releaseURL: URL)
+    case installing(String)
+    case failed(String)
+}
+
 final class SoftwareUpdateController {
     private struct Release: Decodable {
         let tagName: String
@@ -30,13 +39,17 @@ final class SoftwareUpdateController {
 
     private let latestReleaseURL = URL(string: "https://api.github.com/repos/Rainchen537/global-clipboard/releases/latest")!
     private var isChecking = false
+    private var availableAssetURL: URL?
+    var onStatusChange: ((SoftwareUpdateStatus) -> Void)?
 
-    func checkForUpdates(userInitiated: Bool) {
+    func checkForUpdates() {
         guard !isChecking else {
             return
         }
 
         isChecking = true
+        availableAssetURL = nil
+        onStatusChange?(.checking)
 
         var request = URLRequest(url: latestReleaseURL)
         request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
@@ -48,9 +61,7 @@ final class SoftwareUpdateController {
 
             if let error {
                 DispatchQueue.main.async {
-                    if userInitiated {
-                        self?.showAlert(title: "检查更新失败", message: error.localizedDescription)
-                    }
+                    self?.onStatusChange?(.failed(error.localizedDescription))
                 }
                 return
             }
@@ -62,80 +73,63 @@ final class SoftwareUpdateController {
                 !release.prerelease
             else {
                 DispatchQueue.main.async {
-                    if userInitiated {
-                        self?.showAlert(title: "检查更新失败", message: "无法读取 GitHub 最新版本信息。")
-                    }
+                    self?.onStatusChange?(.failed("无法读取 GitHub 最新版本信息。"))
                 }
                 return
             }
 
             DispatchQueue.main.async {
-                self?.handle(release: release, userInitiated: userInitiated)
+                self?.handle(release: release)
             }
         }.resume()
     }
 
-    private func handle(release: Release, userInitiated: Bool) {
+    func installAvailableUpdate() {
+        guard let availableAssetURL else {
+            checkForUpdates()
+            return
+        }
+
+        downloadAndInstall(assetURL: availableAssetURL)
+    }
+
+    private func handle(release: Release) {
         let currentVersion = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0"
         let latestVersion = release.tagName.trimmingCharacters(in: CharacterSet(charactersIn: "vV"))
 
         guard isVersion(latestVersion, newerThan: currentVersion) else {
-            if userInitiated {
-                showAlert(title: "已经是最新版", message: "当前版本 \(currentVersion) 已是最新。")
-            }
+            onStatusChange?(.upToDate(currentVersion))
             return
         }
 
         guard let asset = release.assets.first(where: { $0.name.lowercased().hasSuffix(".dmg") }) else {
-            showUpdateReleasePageAlert(release: release)
+            onStatusChange?(.failed("发现 \(release.tagName)，但没有可自动安装的 DMG。"))
             return
         }
 
-        let alert = NSAlert()
-        alert.messageText = "发现新版本 \(release.tagName)"
-        alert.informativeText = "可以自动下载并安装最新版。安装时应用会短暂退出并重新打开。"
-        alert.alertStyle = .informational
-        alert.addButton(withTitle: "下载并安装")
-        alert.addButton(withTitle: "打开 GitHub")
-        alert.addButton(withTitle: "稍后")
-
-        switch alert.runModal() {
-        case .alertFirstButtonReturn:
-            downloadAndInstall(assetURL: asset.browserDownloadURL)
-        case .alertSecondButtonReturn:
-            NSWorkspace.shared.open(release.htmlURL)
-        default:
-            break
-        }
+        availableAssetURL = asset.browserDownloadURL
+        onStatusChange?(.available(version: release.tagName, assetURL: asset.browserDownloadURL, releaseURL: release.htmlURL))
     }
 
     private func downloadAndInstall(assetURL: URL) {
         guard FileManager.default.isWritableFile(atPath: "/Applications") else {
-            showAlert(
-                title: "无法自动安装",
-                message: "当前用户没有写入 /Applications 的权限。请从 GitHub Release 手动下载 DMG 安装。"
-            )
+            onStatusChange?(.failed("没有写入 /Applications 的权限，请手动下载 DMG 安装。"))
             return
         }
 
-        let waitingAlert = NSAlert()
-        waitingAlert.messageText = "正在下载更新"
-        waitingAlert.informativeText = "下载完成后会自动安装并重启应用。"
-        waitingAlert.alertStyle = .informational
-        waitingAlert.addButton(withTitle: "好")
-        waitingAlert.runModal()
+        onStatusChange?(.installing("正在下载更新…"))
 
         URLSession.shared.downloadTask(with: assetURL) { [weak self] temporaryURL, _, error in
             if let error {
                 DispatchQueue.main.async {
-                    self?.showAlert(title: "下载更新失败", message: error.localizedDescription)
+                    self?.onStatusChange?(.failed(error.localizedDescription))
                 }
                 return
             }
 
             guard let temporaryURL else {
                 DispatchQueue.main.async {
-                    self?.showAlert(title: "下载更新失败", message: "没有收到安装包文件。")
+                    self?.onStatusChange?(.failed("没有收到安装包文件。"))
                 }
                 return
             }
@@ -145,11 +139,12 @@ final class SoftwareUpdateController {
                     .appendingPathComponent("GlobalClipboardUpdate-\(UUID().uuidString).dmg")
                 try FileManager.default.moveItem(at: temporaryURL, to: destination)
                 DispatchQueue.main.async {
+                    self?.onStatusChange?(.installing("正在安装并重启…"))
                     self?.installAndRestart(from: destination)
                 }
             } catch {
                 DispatchQueue.main.async {
-                    self?.showAlert(title: "保存更新失败", message: error.localizedDescription)
+                    self?.onStatusChange?(.failed(error.localizedDescription))
                 }
             }
         }.resume()
@@ -187,30 +182,8 @@ final class SoftwareUpdateController {
 
             NSApp.terminate(nil)
         } catch {
-            showAlert(title: "安装更新失败", message: error.localizedDescription)
+            onStatusChange?(.failed(error.localizedDescription))
         }
-    }
-
-    private func showUpdateReleasePageAlert(release: Release) {
-        let alert = NSAlert()
-        alert.messageText = "发现新版本 \(release.tagName)"
-        alert.informativeText = "没有找到可自动安装的 DMG 附件，可以打开 GitHub Release 手动下载。"
-        alert.alertStyle = .informational
-        alert.addButton(withTitle: "打开 GitHub")
-        alert.addButton(withTitle: "稍后")
-
-        if alert.runModal() == .alertFirstButtonReturn {
-            NSWorkspace.shared.open(release.htmlURL)
-        }
-    }
-
-    private func showAlert(title: String, message: String) {
-        let alert = NSAlert()
-        alert.messageText = title
-        alert.informativeText = message
-        alert.alertStyle = .informational
-        alert.addButton(withTitle: "好")
-        alert.runModal()
     }
 
     private func isVersion(_ lhs: String, newerThan rhs: String) -> Bool {

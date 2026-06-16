@@ -10,12 +10,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem?
     private var focusContext: FocusContext?
     private var hasShownAccessibilityWarning = false
+    private var closeHistoryPanelAfterSettingsClose = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
         setupStatusItem()
         historyStore.startMonitoring()
         setupSettingsPopover()
+        softwareUpdateController.onStatusChange = { [weak self] status in
+            self?.settingsPopoverController?.updateUpdateStatus(status)
+        }
         registerHotKey(settingsStore.hotKey)
         scheduleAutomaticUpdateCheckIfNeeded()
 
@@ -24,7 +28,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self?.historyStore.imageURL(for: payload) ?? URL(fileURLWithPath: "/dev/null")
         }
         panelController.onOpenSettings = { [weak self] sourceView in
-            self?.showSettingsPopover(relativeTo: sourceView, preferredEdge: .maxX)
+            self?.showSettingsPopover(relativeTo: sourceView, preferredEdge: .maxX, closeHistoryOnClose: true)
         }
     }
 
@@ -52,10 +56,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             maxHistoryItems: settingsStore.maxHistoryItems,
             autoUpdateEnabled: settingsStore.autoUpdateEnabled,
             launchAtLoginEnabled: LaunchAtLoginController.isEnabled,
-            onShowHistory: { [weak self] in
-                self?.settingsPopoverController?.close()
-                self?.showClipboardHistory()
-            },
             onClearHistory: { [weak self] in
                 self?.historyStore.clear()
             },
@@ -75,7 +75,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self?.settingsStore.autoUpdateEnabled = enabled
             },
             onCheckForUpdates: { [weak self] in
-                self?.softwareUpdateController.checkForUpdates(userInitiated: true)
+                self?.softwareUpdateController.checkForUpdates()
+            },
+            onInstallUpdate: { [weak self] in
+                self?.softwareUpdateController.installAvailableUpdate()
             },
             onOpenAccessibility: {
                 AccessibilityPermission.openSettings()
@@ -89,6 +92,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 NSApp.terminate(nil)
             }
         )
+        settingsPopoverController?.onClose = { [weak self] in
+            guard let self, closeHistoryPanelAfterSettingsClose else {
+                return
+            }
+
+            closeHistoryPanelAfterSettingsClose = false
+            panelController.close()
+        }
     }
 
     @objc private func toggleSettingsPopover() {
@@ -99,7 +110,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         showSettingsPopover(relativeTo: button, preferredEdge: .minY)
     }
 
-    private func showSettingsPopover(relativeTo view: NSView, preferredEdge: NSRectEdge) {
+    private func showSettingsPopover(
+        relativeTo view: NSView,
+        preferredEdge: NSRectEdge,
+        closeHistoryOnClose: Bool = false
+    ) {
         guard let settingsPopoverController else {
             return
         }
@@ -107,6 +122,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if settingsPopoverController.isShown {
             settingsPopoverController.close()
         } else {
+            closeHistoryPanelAfterSettingsClose = closeHistoryOnClose
             settingsPopoverController.show(relativeTo: view, preferredEdge: preferredEdge)
         }
     }
@@ -173,7 +189,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in
-            self?.softwareUpdateController.checkForUpdates(userInitiated: false)
+            self?.softwareUpdateController.checkForUpdates()
         }
     }
 

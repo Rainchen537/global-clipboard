@@ -4,6 +4,23 @@ import Carbon
 final class SettingsPopoverController: NSObject, NSPopoverDelegate {
     private let popover = NSPopover()
     private let settingsViewController: SettingsViewController
+    private let previewPanel: NSPanel = {
+        let panel = NSPanel(
+            contentRect: .zero,
+            styleMask: [.borderless, .nonactivatingPanel],
+            backing: .buffered,
+            defer: false
+        )
+        panel.isReleasedWhenClosed = false
+        panel.level = .floating
+        panel.hasShadow = false
+        panel.backgroundColor = .clear
+        panel.isOpaque = false
+        panel.ignoresMouseEvents = true
+        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .transient]
+        return panel
+    }()
+    var onClose: (() -> Void)?
 
     init(
         hotKey: HotKey,
@@ -11,7 +28,6 @@ final class SettingsPopoverController: NSObject, NSPopoverDelegate {
         maxHistoryItems: Int,
         autoUpdateEnabled: Bool,
         launchAtLoginEnabled: Bool,
-        onShowHistory: @escaping () -> Void,
         onClearHistory: @escaping () -> Void,
         onLaunchAtLoginChange: @escaping (Bool) -> Void,
         onHotKeyChange: @escaping (HotKey) -> Void,
@@ -19,6 +35,7 @@ final class SettingsPopoverController: NSObject, NSPopoverDelegate {
         onMaxHistoryItemsChange: @escaping (Int) -> Void,
         onAutoUpdateChange: @escaping (Bool) -> Void,
         onCheckForUpdates: @escaping () -> Void,
+        onInstallUpdate: @escaping () -> Void,
         onOpenAccessibility: @escaping () -> Void,
         onOpenGitHub: @escaping () -> Void,
         onQuit: @escaping () -> Void
@@ -29,7 +46,6 @@ final class SettingsPopoverController: NSObject, NSPopoverDelegate {
             maxHistoryItems: maxHistoryItems,
             autoUpdateEnabled: autoUpdateEnabled,
             launchAtLoginEnabled: launchAtLoginEnabled,
-            onShowHistory: onShowHistory,
             onClearHistory: onClearHistory,
             onLaunchAtLoginChange: onLaunchAtLoginChange,
             onHotKeyChange: onHotKeyChange,
@@ -37,6 +53,7 @@ final class SettingsPopoverController: NSObject, NSPopoverDelegate {
             onMaxHistoryItemsChange: onMaxHistoryItemsChange,
             onAutoUpdateChange: onAutoUpdateChange,
             onCheckForUpdates: onCheckForUpdates,
+            onInstallUpdate: onInstallUpdate,
             onOpenAccessibility: onOpenAccessibility,
             onOpenGitHub: onOpenGitHub,
             onQuit: onQuit
@@ -44,11 +61,15 @@ final class SettingsPopoverController: NSObject, NSPopoverDelegate {
 
         super.init()
 
-        popover.contentSize = NSSize(width: 700, height: 520)
+        popover.contentSize = NSSize(width: 432, height: 520)
         popover.behavior = .transient
         popover.animates = true
         popover.contentViewController = settingsViewController
         popover.delegate = self
+        previewPanel.contentView = settingsViewController.previewView
+        settingsViewController.onPreviewMetricsChange = { [weak self] in
+            self?.positionPreviewPanel()
+        }
     }
 
     var isShown: Bool {
@@ -58,6 +79,9 @@ final class SettingsPopoverController: NSObject, NSPopoverDelegate {
     func show(relativeTo view: NSView, preferredEdge: NSRectEdge = .minY) {
         updateLaunchAtLogin(LaunchAtLoginController.isEnabled)
         popover.show(relativeTo: view.bounds, of: view, preferredEdge: preferredEdge)
+        DispatchQueue.main.async { [weak self] in
+            self?.showPreviewPanel()
+        }
     }
 
     func close() {
@@ -70,6 +94,7 @@ final class SettingsPopoverController: NSObject, NSPopoverDelegate {
 
     func updatePanelMetrics(_ metrics: HistoryPanelMetrics) {
         settingsViewController.updatePanelMetrics(metrics)
+        positionPreviewPanel()
     }
 
     func updateMaxHistoryItems(_ count: Int) {
@@ -80,13 +105,67 @@ final class SettingsPopoverController: NSObject, NSPopoverDelegate {
         settingsViewController.updateLaunchAtLogin(enabled)
     }
 
+    func updateUpdateStatus(_ status: SoftwareUpdateStatus) {
+        settingsViewController.updateUpdateStatus(status)
+    }
+
     func popoverDidClose(_ notification: Notification) {
+        previewPanel.orderOut(nil)
         settingsViewController.stopRecording()
+        onClose?()
+    }
+
+    private func showPreviewPanel() {
+        guard popover.isShown else {
+            return
+        }
+
+        positionPreviewPanel()
+        previewPanel.orderFront(nil)
+    }
+
+    private func positionPreviewPanel() {
+        guard
+            popover.isShown,
+            let settingsWindow = settingsViewController.view.window
+        else {
+            return
+        }
+
+        let previewSize = ClipboardPreviewView.previewSize(for: settingsViewController.panelMetrics)
+        settingsViewController.previewView.frame = NSRect(origin: .zero, size: previewSize)
+
+        let settingsFrame = settingsWindow.frame
+        let screen = settingsWindow.screen ?? NSScreen.main ?? NSScreen.screens[0]
+        let visibleFrame = screen.visibleFrame.insetBy(dx: 8, dy: 8)
+
+        let leftX = settingsFrame.minX - previewSize.width
+        let rightX = settingsFrame.maxX
+        let x: CGFloat
+
+        if leftX >= visibleFrame.minX {
+            x = leftX
+        } else if rightX + previewSize.width <= visibleFrame.maxX {
+            x = rightX
+        } else {
+            x = clamp(leftX, lower: visibleFrame.minX, upper: visibleFrame.maxX - previewSize.width)
+        }
+
+        let y = clamp(
+            settingsFrame.maxY - previewSize.height,
+            lower: visibleFrame.minY,
+            upper: visibleFrame.maxY - previewSize.height
+        )
+        previewPanel.setFrame(NSRect(x: x, y: y, width: previewSize.width, height: previewSize.height), display: true)
+    }
+
+    private func clamp(_ value: CGFloat, lower: CGFloat, upper: CGFloat) -> CGFloat {
+        min(max(value, lower), upper)
     }
 }
 
 final class SettingsViewController: NSViewController {
-    private let previewView = ClipboardPreviewView()
+    let previewView = ClipboardPreviewView()
     private let shortcutButton = NSButton(title: "", target: nil, action: nil)
     private let launchAtLoginButton = NSButton(checkboxWithTitle: "开机自启动", target: nil, action: nil)
     private let autoUpdateButton = NSButton(checkboxWithTitle: "自动检查更新", target: nil, action: nil)
@@ -97,13 +176,15 @@ final class SettingsViewController: NSViewController {
     private let widthValueLabel = NSTextField(labelWithString: "")
     private let lengthSlider = NSSlider()
     private let lengthValueLabel = NSTextField(labelWithString: "")
+    private let updateButton = NSButton(title: "检查更新", target: nil, action: nil)
+    private let updateStatusLabel = NSTextField(labelWithString: " ")
     private let historyLimitField = NSTextField(string: "")
     private let historyLimitStepper = NSStepper()
     private var localKeyMonitor: Any?
     private var currentHotKey: HotKey
     private var currentPanelMetrics: HistoryPanelMetrics
     private var currentMaxHistoryItems: Int
-    private let onShowHistory: () -> Void
+    private var currentUpdateStatus: SoftwareUpdateStatus = .idle
     private let onClearHistory: () -> Void
     private let onLaunchAtLoginChange: (Bool) -> Void
     private let onHotKeyChange: (HotKey) -> Void
@@ -111,9 +192,14 @@ final class SettingsViewController: NSViewController {
     private let onMaxHistoryItemsChange: (Int) -> Void
     private let onAutoUpdateChange: (Bool) -> Void
     private let onCheckForUpdates: () -> Void
+    private let onInstallUpdate: () -> Void
     private let onOpenAccessibility: () -> Void
     private let onOpenGitHub: () -> Void
     private let onQuit: () -> Void
+    var onPreviewMetricsChange: (() -> Void)?
+    var panelMetrics: HistoryPanelMetrics {
+        currentPanelMetrics
+    }
 
     init(
         hotKey: HotKey,
@@ -121,7 +207,6 @@ final class SettingsViewController: NSViewController {
         maxHistoryItems: Int,
         autoUpdateEnabled: Bool,
         launchAtLoginEnabled: Bool,
-        onShowHistory: @escaping () -> Void,
         onClearHistory: @escaping () -> Void,
         onLaunchAtLoginChange: @escaping (Bool) -> Void,
         onHotKeyChange: @escaping (HotKey) -> Void,
@@ -129,6 +214,7 @@ final class SettingsViewController: NSViewController {
         onMaxHistoryItemsChange: @escaping (Int) -> Void,
         onAutoUpdateChange: @escaping (Bool) -> Void,
         onCheckForUpdates: @escaping () -> Void,
+        onInstallUpdate: @escaping () -> Void,
         onOpenAccessibility: @escaping () -> Void,
         onOpenGitHub: @escaping () -> Void,
         onQuit: @escaping () -> Void
@@ -136,7 +222,6 @@ final class SettingsViewController: NSViewController {
         currentHotKey = hotKey
         currentPanelMetrics = panelMetrics
         currentMaxHistoryItems = SettingsStore.clampedHistoryLimit(maxHistoryItems)
-        self.onShowHistory = onShowHistory
         self.onClearHistory = onClearHistory
         self.onLaunchAtLoginChange = onLaunchAtLoginChange
         self.onHotKeyChange = onHotKeyChange
@@ -144,6 +229,7 @@ final class SettingsViewController: NSViewController {
         self.onMaxHistoryItemsChange = onMaxHistoryItemsChange
         self.onAutoUpdateChange = onAutoUpdateChange
         self.onCheckForUpdates = onCheckForUpdates
+        self.onInstallUpdate = onInstallUpdate
         self.onOpenAccessibility = onOpenAccessibility
         self.onOpenGitHub = onOpenGitHub
         self.onQuit = onQuit
@@ -159,7 +245,7 @@ final class SettingsViewController: NSViewController {
     }
 
     override func loadView() {
-        let rootView = NSVisualEffectView(frame: NSRect(x: 0, y: 0, width: 700, height: 520))
+        let rootView = NSVisualEffectView(frame: NSRect(x: 0, y: 0, width: 432, height: 520))
         rootView.material = .popover
         rootView.blendingMode = .withinWindow
         rootView.state = .active
@@ -176,9 +262,6 @@ final class SettingsViewController: NSViewController {
         titleStack.orientation = .vertical
         titleStack.spacing = 2
         titleStack.alignment = .leading
-
-        previewView.metrics = currentPanelMetrics
-        previewView.translatesAutoresizingMaskIntoConstraints = false
 
         configureSlider(
             scaleSlider,
@@ -262,25 +345,16 @@ final class SettingsViewController: NSViewController {
         autoUpdateButton.target = self
         autoUpdateButton.action = #selector(toggleAutoUpdate)
 
-        let checkUpdateButton = makeCommandButton(title: "检查更新", symbolName: "arrow.triangle.2.circlepath")
-        checkUpdateButton.target = self
-        checkUpdateButton.action = #selector(checkForUpdates)
-
         let behaviorSection = makeSection(
             title: "行为",
             views: [
                 launchAtLoginButton,
                 autoUpdateButton,
-                checkUpdateButton,
                 shortcutRow,
                 recordingHintLabel,
                 historyLimitRow
             ]
         )
-
-        let showHistoryButton = makeCommandButton(title: "显示历史", symbolName: "list.bullet.clipboard")
-        showHistoryButton.target = self
-        showHistoryButton.action = #selector(showHistory)
 
         let clearButton = makeCommandButton(title: "清空历史", symbolName: "trash")
         clearButton.target = self
@@ -294,13 +368,22 @@ final class SettingsViewController: NSViewController {
         githubButton.target = self
         githubButton.action = #selector(openGitHub)
 
+        configureCommandButton(updateButton, title: "检查更新", symbolName: "arrow.triangle.2.circlepath")
+        updateButton.target = self
+        updateButton.action = #selector(checkForUpdates)
+
         let quitButton = makeCommandButton(title: "退出", symbolName: "power")
         quitButton.target = self
         quitButton.action = #selector(quit)
 
+        updateStatusLabel.font = .systemFont(ofSize: 11)
+        updateStatusLabel.textColor = .secondaryLabelColor
+        updateStatusLabel.lineBreakMode = .byTruncatingTail
+        updateStatusLabel.maximumNumberOfLines = 2
+
         let commandGrid = NSGridView(views: [
-            [showHistoryButton, clearButton],
-            [permissionButton, githubButton],
+            [clearButton, permissionButton],
+            [githubButton, updateButton],
             [quitButton, NSView()]
         ])
         commandGrid.rowSpacing = 8
@@ -309,7 +392,7 @@ final class SettingsViewController: NSViewController {
             commandGrid.column(at: columnIndex).xPlacement = .fill
         }
 
-        let actionsSection = makeSection(title: "操作", views: [commandGrid])
+        let actionsSection = makeSection(title: "操作", views: [commandGrid, updateStatusLabel])
 
         let controlsStack = NSStackView(views: [
             titleStack,
@@ -321,10 +404,10 @@ final class SettingsViewController: NSViewController {
         controlsStack.alignment = .leading
         controlsStack.spacing = 12
 
-        let rootStack = NSStackView(views: [previewView, controlsStack])
-        rootStack.orientation = .horizontal
+        let rootStack = NSStackView(views: [controlsStack])
+        rootStack.orientation = .vertical
         rootStack.alignment = .top
-        rootStack.spacing = 18
+        rootStack.spacing = 0
         rootStack.translatesAutoresizingMaskIntoConstraints = false
 
         view.addSubview(rootStack)
@@ -334,9 +417,6 @@ final class SettingsViewController: NSViewController {
             rootStack.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 18),
             rootStack.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -18),
             rootStack.bottomAnchor.constraint(lessThanOrEqualTo: view.bottomAnchor, constant: -18),
-
-            previewView.widthAnchor.constraint(equalToConstant: 250),
-            previewView.heightAnchor.constraint(equalToConstant: 480),
 
             controlsStack.widthAnchor.constraint(equalToConstant: 396),
             displaySection.widthAnchor.constraint(equalTo: controlsStack.widthAnchor),
@@ -365,6 +445,7 @@ final class SettingsViewController: NSViewController {
         widthValueLabel.stringValue = "\(Int(round(metrics.width)))"
         lengthValueLabel.stringValue = String(format: "%.1f 行", Double(metrics.visibleRows))
         previewView.metrics = metrics
+        onPreviewMetricsChange?()
     }
 
     func updateMaxHistoryItems(_ count: Int) {
@@ -375,6 +456,43 @@ final class SettingsViewController: NSViewController {
 
     func updateLaunchAtLogin(_ enabled: Bool) {
         launchAtLoginButton.state = enabled ? .on : .off
+    }
+
+    func updateUpdateStatus(_ status: SoftwareUpdateStatus) {
+        currentUpdateStatus = status
+
+        switch status {
+        case .idle:
+            updateButton.title = "检查更新"
+            updateButton.isEnabled = true
+            updateStatusLabel.stringValue = " "
+            updateStatusLabel.textColor = .secondaryLabelColor
+        case .checking:
+            updateButton.title = "检查中"
+            updateButton.isEnabled = false
+            updateStatusLabel.stringValue = "正在检查 GitHub Release…"
+            updateStatusLabel.textColor = .secondaryLabelColor
+        case let .upToDate(version):
+            updateButton.title = "检查更新"
+            updateButton.isEnabled = true
+            updateStatusLabel.stringValue = "已是最新版 \(version)"
+            updateStatusLabel.textColor = .secondaryLabelColor
+        case let .available(version, _, _):
+            updateButton.title = "安装更新"
+            updateButton.isEnabled = true
+            updateStatusLabel.stringValue = "发现新版本 \(version)，点击安装更新。"
+            updateStatusLabel.textColor = .controlAccentColor
+        case let .installing(message):
+            updateButton.title = "安装中"
+            updateButton.isEnabled = false
+            updateStatusLabel.stringValue = message
+            updateStatusLabel.textColor = .secondaryLabelColor
+        case let .failed(message):
+            updateButton.title = "检查更新"
+            updateButton.isEnabled = true
+            updateStatusLabel.stringValue = message
+            updateStatusLabel.textColor = .systemRed
+        }
     }
 
     func stopRecording() {
@@ -396,7 +514,11 @@ final class SettingsViewController: NSViewController {
     }
 
     @objc private func checkForUpdates() {
-        onCheckForUpdates()
+        if case .available = currentUpdateStatus {
+            onInstallUpdate()
+        } else {
+            onCheckForUpdates()
+        }
     }
 
     @objc private func changePanelMetrics() {
@@ -429,10 +551,6 @@ final class SettingsViewController: NSViewController {
             self?.record(event)
             return nil
         }
-    }
-
-    @objc private func showHistory() {
-        onShowHistory()
     }
 
     @objc private func clearHistory() {
@@ -527,13 +645,18 @@ final class SettingsViewController: NSViewController {
 
     private func makeCommandButton(title: String, symbolName: String) -> NSButton {
         let button = NSButton(title: title, target: nil, action: nil)
+        configureCommandButton(button, title: title, symbolName: symbolName)
+        return button
+    }
+
+    private func configureCommandButton(_ button: NSButton, title: String, symbolName: String) {
+        button.title = title
         button.bezelStyle = .rounded
         button.image = NSImage(systemSymbolName: symbolName, accessibilityDescription: title)
         button.imagePosition = .imageLeading
         button.alignment = .center
         button.translatesAutoresizingMaskIntoConstraints = false
         button.heightAnchor.constraint(equalToConstant: 30).isActive = true
-        return button
     }
 
     private func label(_ title: String, weight: NSFont.Weight = .regular) -> NSTextField {
@@ -544,113 +667,219 @@ final class SettingsViewController: NSViewController {
 }
 
 final class ClipboardPreviewView: NSView {
+    private struct PreviewSample {
+        let item: ClipboardItem
+        let thumbnail: NSImage?
+    }
+
     var metrics: HistoryPanelMetrics = .default {
         didSet {
-            needsDisplay = true
+            updatePreview()
         }
     }
+
+    private let previewHost = NSView()
+    private let panelView = NSVisualEffectView()
+    private let headerStack = NSStackView()
+    private let headerLabel = NSTextField(labelWithString: "剪贴板历史")
+    private let hintLabel = NSTextField(labelWithString: "↑↓ 选择 · Enter 粘贴 · Esc 关闭")
+    private let settingsButton = NSButton()
+    private let scrollView = NSScrollView()
+    private let stackView = NSStackView()
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
         wantsLayer = true
         layer?.cornerRadius = 16
         layer?.masksToBounds = true
+        layer?.backgroundColor = NSColor.clear.cgColor
+
+        previewHost.translatesAutoresizingMaskIntoConstraints = false
+        previewHost.wantsLayer = true
+        previewHost.layer?.masksToBounds = true
+
+        panelView.material = .popover
+        panelView.blendingMode = .withinWindow
+        panelView.state = .active
+        panelView.wantsLayer = true
+        panelView.alphaValue = 0.76
+        panelView.layer?.cornerRadius = 10
+        panelView.layer?.masksToBounds = true
+        panelView.layer?.borderWidth = 1
+        panelView.layer?.borderColor = NSColor.separatorColor.withAlphaComponent(0.28).cgColor
+
+        headerStack.orientation = .vertical
+        headerStack.spacing = 2
+        headerStack.alignment = .leading
+        headerStack.translatesAutoresizingMaskIntoConstraints = false
+
+        hintLabel.textColor = .secondaryLabelColor
+        hintLabel.lineBreakMode = .byTruncatingTail
+        headerStack.addArrangedSubview(headerLabel)
+        headerStack.addArrangedSubview(hintLabel)
+
+        settingsButton.image = NSImage(systemSymbolName: "gearshape", accessibilityDescription: "设置")
+        settingsButton.bezelStyle = .regularSquare
+        settingsButton.isBordered = false
+        settingsButton.imagePosition = .imageOnly
+        settingsButton.contentTintColor = .secondaryLabelColor
+        settingsButton.translatesAutoresizingMaskIntoConstraints = false
+
+        stackView.orientation = .vertical
+        stackView.alignment = .leading
+        stackView.translatesAutoresizingMaskIntoConstraints = false
+
+        scrollView.drawsBackground = false
+        scrollView.hasVerticalScroller = true
+        scrollView.borderType = .noBorder
+        scrollView.documentView = stackView
+        scrollView.translatesAutoresizingMaskIntoConstraints = false
+
+        previewHost.addSubview(panelView)
+        panelView.addSubview(headerStack)
+        panelView.addSubview(settingsButton)
+        panelView.addSubview(scrollView)
+        addSubview(previewHost)
+
+        NSLayoutConstraint.activate([
+            previewHost.topAnchor.constraint(equalTo: topAnchor),
+            previewHost.leadingAnchor.constraint(equalTo: leadingAnchor),
+            previewHost.trailingAnchor.constraint(equalTo: trailingAnchor),
+            previewHost.bottomAnchor.constraint(equalTo: bottomAnchor)
+        ])
+
+        NSLayoutConstraint.activate([
+            headerStack.topAnchor.constraint(equalTo: panelView.topAnchor, constant: 12),
+            headerStack.leadingAnchor.constraint(equalTo: panelView.leadingAnchor, constant: 14),
+            headerStack.trailingAnchor.constraint(lessThanOrEqualTo: settingsButton.leadingAnchor, constant: -10),
+
+            settingsButton.trailingAnchor.constraint(equalTo: panelView.trailingAnchor, constant: -10),
+            settingsButton.centerYAnchor.constraint(equalTo: headerStack.centerYAnchor),
+            settingsButton.widthAnchor.constraint(equalToConstant: 26),
+            settingsButton.heightAnchor.constraint(equalToConstant: 26),
+
+            scrollView.topAnchor.constraint(equalTo: headerStack.bottomAnchor, constant: 10),
+            scrollView.leadingAnchor.constraint(equalTo: panelView.leadingAnchor, constant: 8),
+            scrollView.trailingAnchor.constraint(equalTo: panelView.trailingAnchor, constant: -8),
+            scrollView.bottomAnchor.constraint(equalTo: panelView.bottomAnchor, constant: -8),
+
+            stackView.leadingAnchor.constraint(equalTo: scrollView.contentView.leadingAnchor),
+            stackView.trailingAnchor.constraint(equalTo: scrollView.contentView.trailingAnchor),
+            stackView.topAnchor.constraint(equalTo: scrollView.contentView.topAnchor),
+            stackView.widthAnchor.constraint(equalTo: scrollView.contentView.widthAnchor)
+        ])
+
+        updatePreview()
     }
 
     required init?(coder: NSCoder) {
         nil
     }
 
-    override func draw(_ dirtyRect: NSRect) {
-        super.draw(dirtyRect)
+    override func layout() {
+        super.layout()
+        layoutPreviewPanel()
+    }
 
-        NSColor.windowBackgroundColor.withAlphaComponent(0.34).setFill()
-        bounds.fill()
-
-        let title = NSAttributedString(
-            string: "实时预览",
-            attributes: [
-                .font: NSFont.systemFont(ofSize: 13, weight: .semibold),
-                .foregroundColor: NSColor.secondaryLabelColor
-            ]
-        )
-        title.draw(at: NSPoint(x: 16, y: bounds.maxY - 32))
-
-        let panelHeight = metrics.headerHeight
-            + metrics.visibleRows * metrics.rowHeight
+    static func previewSize(for metrics: HistoryPanelMetrics) -> NSSize {
+        let contentHeight = metrics.visibleRows * metrics.rowHeight
             + max(0, metrics.visibleRows - 1) * metrics.rowSpacing
-            + 12
-        let modelSize = NSSize(width: metrics.panelWidth, height: panelHeight)
-        let scale = min((bounds.width - 32) / modelSize.width, (bounds.height - 72) / modelSize.height)
-        let drawSize = NSSize(width: modelSize.width * scale, height: modelSize.height * scale)
-        let origin = NSPoint(
-            x: bounds.midX - drawSize.width / 2,
-            y: bounds.midY - drawSize.height / 2 - 8
-        )
-        let panelRect = NSRect(origin: origin, size: drawSize)
-
-        NSGraphicsContext.saveGraphicsState()
-        let shadow = NSShadow()
-        shadow.shadowBlurRadius = 18
-        shadow.shadowOffset = NSSize(width: 0, height: -6)
-        shadow.shadowColor = NSColor.black.withAlphaComponent(0.18)
-        shadow.set()
-
-        let panelPath = NSBezierPath(roundedRect: panelRect, xRadius: 12, yRadius: 12)
-        NSColor.controlBackgroundColor.withAlphaComponent(0.70).setFill()
-        panelPath.fill()
-        NSGraphicsContext.restoreGraphicsState()
-
-        NSColor.separatorColor.withAlphaComponent(0.35).setStroke()
-        panelPath.lineWidth = 1
-        panelPath.stroke()
-
-        let headerRect = NSRect(
-            x: panelRect.minX + 14 * scale,
-            y: panelRect.maxY - 34 * scale,
-            width: panelRect.width - 48 * scale,
-            height: 16 * scale
-        )
-        drawTextBlock(in: headerRect, widthRatio: 0.46, alpha: 0.42)
-        drawGear(in: NSRect(
-            x: panelRect.maxX - 30 * scale,
-            y: panelRect.maxY - 32 * scale,
-            width: 16 * scale,
-            height: 16 * scale
-        ))
-
-        var rowY = panelRect.maxY - metrics.headerHeight * scale - metrics.rowHeight * scale
-        for index in 0..<Int(round(metrics.visibleRows)) {
-            let rowRect = NSRect(
-                x: panelRect.minX + 8 * scale,
-                y: rowY,
-                width: panelRect.width - 16 * scale,
-                height: metrics.rowHeight * scale
-            )
-            let rowPath = NSBezierPath(roundedRect: rowRect, xRadius: 8 * scale, yRadius: 8 * scale)
-            NSColor.labelColor.withAlphaComponent(index == 0 ? 0.10 : 0.055).setFill()
-            rowPath.fill()
-
-            let textRect = rowRect.insetBy(dx: metrics.contentInset * scale, dy: 12 * scale)
-            drawTextBlock(in: textRect, widthRatio: index == 1 ? 0.72 : 0.88, alpha: 0.28)
-            rowY -= (metrics.rowHeight + metrics.rowSpacing) * scale
-        }
+        return NSSize(width: metrics.panelWidth, height: 58 + contentHeight + 12)
     }
 
-    private func drawTextBlock(in rect: NSRect, widthRatio: CGFloat, alpha: CGFloat) {
-        let path = NSBezierPath(
-            roundedRect: NSRect(x: rect.minX, y: rect.midY - 3, width: rect.width * widthRatio, height: 6),
-            xRadius: 3,
-            yRadius: 3
-        )
-        NSColor.labelColor.withAlphaComponent(alpha).setFill()
-        path.fill()
+    private func updatePreview() {
+        headerLabel.font = .systemFont(ofSize: metrics.headerFontSize, weight: .semibold)
+        headerLabel.textColor = .labelColor
+        hintLabel.font = .systemFont(ofSize: metrics.hintFontSize)
+        hintLabel.textColor = .secondaryLabelColor
+        stackView.spacing = metrics.rowSpacing
+        renderRows()
+        layoutPreviewPanel()
     }
 
-    private func drawGear(in rect: NSRect) {
-        guard let image = NSImage(systemSymbolName: "gearshape", accessibilityDescription: nil) else {
+    private func layoutPreviewPanel() {
+        guard previewHost.bounds.width > 0, previewHost.bounds.height > 0 else {
             return
         }
-        image.draw(in: rect, from: .zero, operation: .sourceOver, fraction: 0.28)
+
+        let modelSize = Self.previewSize(for: metrics)
+        let scale = min(previewHost.bounds.width / modelSize.width, previewHost.bounds.height / modelSize.height)
+        let drawSize = NSSize(width: modelSize.width * scale, height: modelSize.height * scale)
+        panelView.frame = NSRect(
+            x: (previewHost.bounds.width - drawSize.width) / 2,
+            y: (previewHost.bounds.height - drawSize.height) / 2,
+            width: drawSize.width,
+            height: drawSize.height
+        )
+        panelView.bounds = NSRect(origin: .zero, size: modelSize)
+        panelView.layer?.cornerRadius = max(5, 10 * scale)
+        panelView.layoutSubtreeIfNeeded()
+    }
+
+    private func renderRows() {
+        let rowCount = max(1, Int(ceil(metrics.visibleRows)))
+        stackView.arrangedSubviews.forEach { view in
+            stackView.removeArrangedSubview(view)
+            view.removeFromSuperview()
+        }
+
+        let samples = previewSamples(rowCount: rowCount)
+        for (index, sample) in samples.enumerated() {
+            let row = HistoryRowView(item: sample.item, thumbnail: sample.thumbnail, metrics: metrics) {}
+            row.isSelected = index == 0
+            stackView.addArrangedSubview(row)
+            row.widthAnchor.constraint(equalTo: stackView.widthAnchor).isActive = true
+        }
+    }
+
+    private func previewSamples(rowCount: Int) -> [PreviewSample] {
+        let imagePayload = ImagePayload(
+            fileName: "preview.png",
+            pixelWidth: 1440,
+            pixelHeight: 900,
+            digest: "preview"
+        )
+        let baseSamples = [
+            PreviewSample(
+                item: ClipboardItem(text: "刚复制的一段比较长的文字会在这里展示，最多三行，超出的部分会自然省略。"),
+                thumbnail: nil
+            ),
+            PreviewSample(
+                item: ClipboardItem(text: "https://github.com/Rainchen537/global-clipboard"),
+                thumbnail: nil
+            ),
+            PreviewSample(
+                item: ClipboardItem(kind: .image(imagePayload), createdAt: Date()),
+                thumbnail: Self.previewThumbnail()
+            ),
+            PreviewSample(
+                item: ClipboardItem(text: "会议记录：确认快捷键、历史数量上限和自动更新状态展示。"),
+                thumbnail: nil
+            )
+        ]
+
+        return (0..<rowCount).map { baseSamples[$0 % baseSamples.count] }
+    }
+
+    private static func previewThumbnail() -> NSImage {
+        let size = NSSize(width: 180, height: 120)
+        let image = NSImage(size: size)
+        image.lockFocus()
+        NSColor.controlAccentColor.withAlphaComponent(0.20).setFill()
+        NSBezierPath(roundedRect: NSRect(origin: .zero, size: size), xRadius: 14, yRadius: 14).fill()
+        NSColor.separatorColor.withAlphaComponent(0.65).setStroke()
+        let border = NSBezierPath(roundedRect: NSRect(x: 0.5, y: 0.5, width: size.width - 1, height: size.height - 1), xRadius: 14, yRadius: 14)
+        border.lineWidth = 1
+        border.stroke()
+        if let symbol = NSImage(systemSymbolName: "photo", accessibilityDescription: nil) {
+            symbol.draw(
+                in: NSRect(x: 66, y: 36, width: 48, height: 48),
+                from: .zero,
+                operation: .sourceOver,
+                fraction: 0.55
+            )
+        }
+        image.unlockFocus()
+        return image
     }
 }
