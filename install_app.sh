@@ -13,7 +13,11 @@ fi
 
 pkill -x GlobalClipboard 2>/dev/null || true
 mkdir -p "$INSTALL_DIR"
-rm -rf "$TARGET_APP"
+if [[ -d "$TARGET_APP" ]]; then
+  find "$TARGET_APP" -mindepth 1 -maxdepth 1 -exec rm -rf {} +
+else
+  mkdir -p "$TARGET_APP"
+fi
 ditto "$SOURCE_APP" "$TARGET_APP"
 xattr -cr "$TARGET_APP"
 

@@ -160,17 +160,26 @@ final class SoftwareUpdateController {
             DMG="$1"
             DEST="/Applications/Global Clipboard.app"
             EXEC="GlobalClipboard"
+            BUNDLE_ID="com.lixingchen.GlobalClipboard"
+            LSREGISTER="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
             MOUNT="$(hdiutil attach "$DMG" -nobrowse -noautoopen | awk '/\\/Volumes\\// { for (i=3; i<=NF; i++) { printf "%s%s", (i==3 ? "" : " "), $i } print ""; exit }')"
             APP="$MOUNT/Global Clipboard.app"
             while pgrep -x "$EXEC" >/dev/null 2>&1; do
               sleep 0.2
             done
-            rm -rf "$DEST"
+            if [[ -d "$DEST" ]]; then
+              find "$DEST" -mindepth 1 -maxdepth 1 -exec rm -rf {} +
+            else
+              mkdir -p "$DEST"
+            fi
             ditto "$APP" "$DEST"
             xattr -cr "$DEST"
+            codesign --verify --strict --verbose=2 "$DEST" >/dev/null
+            [[ -x "$LSREGISTER" ]] && "$LSREGISTER" -f "$DEST" >/dev/null 2>&1 || true
+            touch "$DEST"
             hdiutil detach "$MOUNT" >/dev/null 2>&1 || hdiutil detach "$MOUNT" -force >/dev/null 2>&1 || true
             rm -f "$DMG" "$0"
-            open "$DEST"
+            open -b "$BUNDLE_ID" >/dev/null 2>&1 || open "$DEST"
             """
             try script.write(to: scriptURL, atomically: true, encoding: .utf8)
             try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: scriptURL.path)

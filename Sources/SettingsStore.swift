@@ -9,6 +9,7 @@ final class SettingsStore {
         static let panelWidth = "panelWidth"
         static let panelVisibleRows = "panelVisibleRows"
         static let autoUpdateEnabled = "autoUpdateEnabled"
+        static let accessibilityWasTrusted = "accessibilityWasTrusted"
     }
 
     static let defaultMaxHistoryItems = 50
@@ -79,6 +80,15 @@ final class SettingsStore {
         }
         set {
             defaults.set(newValue, forKey: Keys.autoUpdateEnabled)
+        }
+    }
+
+    var accessibilityWasTrusted: Bool {
+        get {
+            defaults.bool(forKey: Keys.accessibilityWasTrusted)
+        }
+        set {
+            defaults.set(newValue, forKey: Keys.accessibilityWasTrusted)
         }
     }
 

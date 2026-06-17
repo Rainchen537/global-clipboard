@@ -21,6 +21,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         registerHotKey(settingsStore.hotKey)
         scheduleAutomaticUpdateCheckIfNeeded()
+        rememberAccessibilityTrustIfNeeded()
 
         // 让面板能根据图片项找到磁盘上的全图，用于生成缩略图。
         panelController.imageURLProvider = { [weak self] payload in
@@ -85,8 +86,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             onInstallUpdate: { [weak self] in
                 self?.softwareUpdateController.installAvailableUpdate()
             },
-            onOpenAccessibility: {
-                AccessibilityPermission.openSettings()
+            onOpenAccessibility: { [weak self] in
+                self?.showAccessibilityRepairOptions()
             },
             onOpenGitHub: {
                 if let url = URL(string: "https://github.com/Rainchen537/global-clipboard") {
@@ -226,7 +227,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func paste(_ item: ClipboardItem) {
         historyStore.writeToPasteboard(item)
 
-        guard AccessibilityPermission.isTrusted(prompt: false) else {
+        guard isAccessibilityTrusted() else {
             restoreFocus()
             showAccessibilityWarningIfNeeded()
             return
@@ -241,6 +242,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func restoreFocus() {
         FocusContextReader.restore(focusContext)
+    }
+
+    private func isAccessibilityTrusted() -> Bool {
+        let trusted = AccessibilityPermission.isTrusted(prompt: false)
+        if trusted {
+            settingsStore.accessibilityWasTrusted = true
+        }
+
+        return trusted
+    }
+
+    private func rememberAccessibilityTrustIfNeeded() {
+        if AccessibilityPermission.isTrusted(prompt: false) {
+            settingsStore.accessibilityWasTrusted = true
+        }
     }
 
     private func usableAnchorPoint(_ point: NSPoint?) -> NSPoint {
@@ -261,16 +277,54 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         hasShownAccessibilityWarning = true
+        showAccessibilityRepairOptions()
+    }
+
+    private func showAccessibilityRepairOptions() {
+        if AccessibilityPermission.isTrusted(prompt: false) {
+            settingsStore.accessibilityWasTrusted = true
+            AccessibilityPermission.openSettings()
+            return
+        }
 
         let alert = NSAlert()
-        alert.messageText = "已复制到剪贴板"
-        alert.informativeText = "当前系统仍未把这个版本的应用识别为已授权，所以暂时不会自动粘贴。如果你已经打开过开关，请重置一次辅助功能权限后重新添加 Global Clipboard。"
-        alert.alertStyle = .informational
-        alert.addButton(withTitle: "打开系统设置")
-        alert.addButton(withTitle: "稍后")
+        let wasTrustedBefore = settingsStore.accessibilityWasTrusted
 
-        if alert.runModal() == .alertFirstButtonReturn {
+        if wasTrustedBefore {
+            alert.messageText = "辅助功能权限需要刷新"
+            alert.informativeText = "macOS 在应用更新后有时会保留旧的辅助功能记录，导致系统设置里看起来已开启，但当前版本实际无法发送粘贴快捷键。可以先刷新这条记录，再重新勾选 Global Clipboard。"
+            alert.addButton(withTitle: "刷新权限记录")
+            alert.addButton(withTitle: "打开系统设置")
+            alert.addButton(withTitle: "稍后")
+        } else {
+            alert.messageText = "已复制到剪贴板"
+            alert.informativeText = "当前还没有授予辅助功能权限，所以暂时不会自动粘贴。开启权限后，选择历史记录会继续粘贴到原本聚焦的输入框。"
+            alert.addButton(withTitle: "打开系统设置")
+            alert.addButton(withTitle: "稍后")
+        }
+
+        alert.alertStyle = .informational
+
+        let response = alert.runModal()
+        if wasTrustedBefore, response == .alertFirstButtonReturn {
+            refreshAccessibilityAuthorization()
+        } else if response == (wasTrustedBefore ? .alertSecondButtonReturn : .alertFirstButtonReturn) {
+            AccessibilityPermission.requestPrompt()
             AccessibilityPermission.openSettings()
+        }
+    }
+
+    private func refreshAccessibilityAuthorization() {
+        do {
+            try AccessibilityPermission.resetAuthorization()
+            settingsStore.accessibilityWasTrusted = false
+            AccessibilityPermission.requestPrompt()
+            AccessibilityPermission.openSettings()
+        } catch {
+            showAlert(
+                title: "刷新辅助功能权限失败",
+                message: error.localizedDescription
+            )
         }
     }
 
