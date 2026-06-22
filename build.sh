@@ -5,10 +5,15 @@ APP_NAME="Global Clipboard"
 EXECUTABLE_NAME="GlobalClipboard"
 ROOT_DIR="$(cd "$(dirname "$0")" && pwd)"
 BUILD_DIR="$ROOT_DIR/build"
-APP_DIR="$BUILD_DIR/$APP_NAME.app"
+FINAL_APP_DIR="$BUILD_DIR/$APP_NAME.app"
+TMP_PARENT="${TMPDIR:-/tmp}"
+TMP_BUILD_DIR="$(mktemp -d "$TMP_PARENT/global-clipboard-build.XXXXXX")"
+APP_DIR="$TMP_BUILD_DIR/$APP_NAME.app"
 CONTENTS_DIR="$APP_DIR/Contents"
 MACOS_DIR="$CONTENTS_DIR/MacOS"
 ENTITLEMENTS="$ROOT_DIR/GlobalClipboard.entitlements"
+
+trap 'rm -rf "$TMP_BUILD_DIR"' EXIT
 
 # 签名模式：
 #   RELEASE=1 时用 Developer ID + hardened runtime（发布/公证用）；
@@ -38,6 +43,7 @@ else
   fi
 fi
 
+# 先在临时目录中构建和签名，避免 iCloud/File Provider 工作区给 .app 附加 FinderInfo 导致 codesign 拒签。
 rm -rf "$APP_DIR"
 mkdir -p "$MACOS_DIR"
 
@@ -78,7 +84,11 @@ else
   codesign --force --deep --sign "$SIGN_IDENTITY" "$APP_DIR" >/dev/null
 fi
 
-echo "已构建：$APP_DIR"
+rm -rf "$FINAL_APP_DIR"
+mkdir -p "$BUILD_DIR"
+ditto --noextattr --noqtn "$APP_DIR" "$FINAL_APP_DIR"
+
+echo "已构建：$FINAL_APP_DIR"
 echo "签名身份：$SIGN_IDENTITY"
 if [[ "$RELEASE" == "1" ]]; then
   echo "模式：发布（hardened runtime）"

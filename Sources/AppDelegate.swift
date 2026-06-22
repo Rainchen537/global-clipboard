@@ -44,10 +44,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func setupStatusItem() {
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
-        item.button?.image = NSImage(
-            systemSymbolName: "clipboard",
-            accessibilityDescription: "剪贴板历史"
-        )
+        item.button?.image = StatusBarIcon.makeImage()
         item.button?.imagePosition = .imageOnly
         item.button?.target = self
         item.button?.action = #selector(toggleSettingsPopover)
