@@ -8,6 +8,7 @@ SOURCE_APP="$ROOT_DIR/build/$APP_NAME.app"
 INSTALL_DIR="${INSTALL_DIR:-/Applications}"
 TARGET_APP="$INSTALL_DIR/$APP_NAME.app"
 LEGACY_TARGET_APP="$INSTALL_DIR/$LEGACY_APP_NAME.app"
+LSREGISTER="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
 
 if [[ ! -d "$SOURCE_APP" ]]; then
   "$ROOT_DIR/build.sh"
@@ -29,5 +30,7 @@ if [[ "$LEGACY_TARGET_APP" != "$TARGET_APP" && -d "$LEGACY_TARGET_APP" ]]; then
 fi
 
 codesign --verify --deep --verbose=2 "$TARGET_APP"
+[[ -x "$LSREGISTER" ]] && "$LSREGISTER" -f "$TARGET_APP" >/dev/null 2>&1 || true
+touch "$TARGET_APP"
 
 echo "已安装：$TARGET_APP"
