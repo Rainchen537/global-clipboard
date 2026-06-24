@@ -21,6 +21,12 @@ final class ClipboardHistoryPanel: NSPanel {
     }
 }
 
+private final class TopAlignedStackView: NSStackView {
+    override var isFlipped: Bool {
+        true
+    }
+}
+
 /// 历史弹窗显示参数：大小负责等比例缩放内容，宽度/长度只改变容器尺寸。
 struct HistoryPanelMetrics: Codable, Equatable {
     static let `default` = HistoryPanelMetrics(scale: 1.0, width: 360, visibleRows: 4)
@@ -227,7 +233,7 @@ final class ClipboardPanelController {
     private let panel: ClipboardHistoryPanel
     private let rootView = NSVisualEffectView()
     private let scrollView = NSScrollView()
-    private let stackView = NSStackView()
+    private let stackView = TopAlignedStackView()
     private let headerLabel = NSTextField(labelWithString: "剪贴板历史")
     private let hintLabel = NSTextField(labelWithString: "↑↓ 选择 · Enter 粘贴 · Esc 关闭")
     private let settingsButton = NSButton()
