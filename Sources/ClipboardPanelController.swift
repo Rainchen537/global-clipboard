@@ -574,7 +574,22 @@ final class ClipboardPanelController {
     }
 
     private func scrollToTop() {
+        performScrollToTop()
+
+        // NSScrollView 在 panel 刚显示时还可能有一轮延迟布局；下一轮主队列再校准一次，
+        // 避免把文档视图的临时空白区域当成顶部。
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.panel.isVisible else {
+                return
+            }
+
+            self.performScrollToTop()
+        }
+    }
+
+    private func performScrollToTop() {
         rootView.layoutSubtreeIfNeeded()
+        scrollView.layoutSubtreeIfNeeded()
         stackView.layoutSubtreeIfNeeded()
 
         guard let documentView = scrollView.documentView else {
@@ -582,11 +597,22 @@ final class ClipboardPanelController {
         }
 
         let clipView = scrollView.contentView
-        let y = documentView.isFlipped
-            ? CGFloat(0)
-            : max(0, documentView.bounds.height - clipView.bounds.height)
+        let y = topContentScrollOrigin(documentView: documentView, clipView: clipView)
         clipView.scroll(to: NSPoint(x: 0, y: y))
         scrollView.reflectScrolledClipView(clipView)
+    }
+
+    private func topContentScrollOrigin(documentView: NSView, clipView: NSClipView) -> CGFloat {
+        let maxY = max(0, documentView.bounds.height - clipView.bounds.height)
+        guard let firstContentView = stackView.arrangedSubviews.first(where: { !$0.isHidden }) else {
+            return documentView.isFlipped ? 0 : maxY
+        }
+
+        let contentFrame = firstContentView.convert(firstContentView.bounds, to: documentView)
+        let rawY = documentView.isFlipped
+            ? contentFrame.minY
+            : contentFrame.maxY - clipView.bounds.height
+        return clamp(rawY, lower: 0, upper: maxY)
     }
 
     private static func signature(for items: [ClipboardItem]) -> [String] {
